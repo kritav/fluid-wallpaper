@@ -1,4 +1,4 @@
 # Tested with CPython 3.12. Newer Pythons may lack wheels for these
 # versions; if you need 3.13+, bump numpy to >=2.1 and pygame to >=2.6.
 numpy>=1.26
-pygame>=2.5
+pygame>=2.6
