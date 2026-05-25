@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(fluid-wallpaper CXX)
+project(fluid-wallpaper LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+find_package(CUDAToolkit REQUIRED)
 
 # Console-subsystem exe (no WIN32 flag) — Phase 1 keeps a console window
 # for logs and Ctrl+C exit. Phase 5 will turn this into a proper tray app.
@@ -10,6 +12,14 @@ add_executable(fluid-wallpaper
     src/main.cpp
     src/wallpaper.cpp
     src/renderer.cpp
+    src/cuda_renderer.cu
+)
+
+# Turing (75), Ampere (80, 86), Ada (89), Hopper (90). Drop the highest
+# entries if nvcc complains about an unsupported arch on older toolkits.
+set_target_properties(fluid-wallpaper PROPERTIES
+    CUDA_ARCHITECTURES "75;80;86;89;90"
+    CUDA_SEPARABLE_COMPILATION ON
 )
 
 target_include_directories(fluid-wallpaper PRIVATE src)
@@ -18,6 +28,7 @@ target_link_libraries(fluid-wallpaper PRIVATE
     d3d11
     dxgi
     d3dcompiler
+    CUDA::cudart
 )
 
 target_compile_definitions(fluid-wallpaper PRIVATE

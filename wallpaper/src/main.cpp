@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "cuda_renderer.h"
 #include "renderer.h"
 #include "wallpaper.h"
 
@@ -64,6 +65,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    CudaRenderer cuda;
+    if (!cuda.init(renderer.shared_texture(), width, height)) {
+        fprintf(stderr, "CUDA renderer init failed.\n");
+        DestroyWindow(hwnd);
+        return 1;
+    }
+
     printf("Running at %dx%d. Close this console to exit.\n", width, height);
 
     const auto start = std::chrono::steady_clock::now();
@@ -81,7 +89,8 @@ int main(int argc, char** argv) {
 
         const auto now = std::chrono::steady_clock::now();
         const float t  = std::chrono::duration<float>(now - start).count();
-        renderer.render(t);
+        cuda.render(t);
+        renderer.render();
     }
 
     DestroyWindow(hwnd);
