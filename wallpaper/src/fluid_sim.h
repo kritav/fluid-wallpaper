@@ -35,6 +35,19 @@ struct SimState {
     Field scratch;
 };
 
+// Output rendering style. Cycled at runtime via the `M` hotkey.
+enum class VisualMode {
+    DensityPlasma = 0,
+    DensityInferno,
+    DensityViridis,
+    DensityCool,
+    Velocity,
+    VelocityColored,
+    Count,
+};
+
+const char* visualModeName(VisualMode m);
+
 bool createField(Field& f, int width, int height);
 void destroyField(Field& f);
 void swapFields(Field& a, Field& b);
@@ -43,14 +56,20 @@ void clearField(Field& f, float value = 0.0f);
 
 bool createSimState(SimState& s, int width, int height);
 void destroySimState(SimState& s);
+void clearSimState(SimState& s);
 
 // One full Stam timestep: addForce → diffuse vel → project → advect vel →
 // project → advect density → dissipate. Mirrors prototype/stable_fluids.py.
 void stepSimulation(SimState& s, const MouseInput& mouse, float dt);
 
-// Read the simulation density grid with bilinear filtering and write a
-// grayscale RGBA8 image to the (typically larger) DX11 shared texture.
-// Phase 4 will replace the grayscale colormap with something prettier.
-void renderDensityToOutput(const Field& density,
-                           cudaSurfaceObject_t outputSurf,
-                           int outputWidth, int outputHeight);
+// Inject a few small swirling "fountains" that slowly drift around the grid.
+// Drives gentle motion when the user isn't moving the mouse. wall_time is
+// total elapsed seconds since launch — used to animate the fountain centers.
+void injectIdlePerturbation(SimState& s, float wall_time);
+
+// Read the simulation fields, tone-map and colormap according to `mode`,
+// upsample to display resolution, write RGBA8 to the DX11 shared texture.
+void renderSimToOutput(const SimState& s,
+                       cudaSurfaceObject_t outputSurf,
+                       int outputWidth, int outputHeight,
+                       VisualMode mode);

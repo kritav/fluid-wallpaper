@@ -23,6 +23,22 @@ BOOL WINAPI console_ctrl_handler(DWORD type) {
     return FALSE;
 }
 
+// Edge-detected key press. GetAsyncKeyState's high bit is the current down
+// state; we compare to last frame's so a held key fires only once. Caller
+// owns the `was_down` flag (one per hotkey).
+bool keyPressed(bool& was_down, int vk) {
+    bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+    bool pressed = down && !was_down;
+    was_down = down;
+    return pressed;
+}
+
+VisualMode nextMode(VisualMode m) {
+    int n = static_cast<int>(m) + 1;
+    if (n >= static_cast<int>(VisualMode::Count)) n = 0;
+    return static_cast<VisualMode>(n);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -74,10 +90,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("Running at %dx%d. Move your mouse to inject fluid. "
-           "Close this console to exit.\n", width, height);
+    printf("Running at %dx%d.\n", width, height);
+    printf("Hotkeys: M=mode  B=bloom  I=idle  C=clear  Esc=quit\n");
 
-    auto last_time = std::chrono::steady_clock::now();
+    RenderSettings settings;
+    printf("[mode]  %s\n", visualModeName(settings.mode));
+    printf("[bloom] %s\n", settings.bloom_enabled ? "on" : "off");
+    printf("[idle]  %s\n", settings.idle_enabled ? "on" : "off");
+
+    bool m_was = false, b_was = false, i_was = false, c_was = false, esc_was = false;
+
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_time  = start_time;
     MSG msg{};
     while (!g_quit) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -98,11 +122,34 @@ int main(int argc, char** argv) {
         // a corner before dissipation pulls it back). Cap at one 60 Hz
         // frame even if rendering hitches; floor avoids degenerate zero.
         dt = std::clamp(dt, 1.0f / 240.0f, 1.0f / 60.0f);
-        dt = fminf(dt, 1.0f / 60.0f);
+
         updateMouseState();
         MouseInput mouse = getMouseInput(width, height);
 
-        cuda.render(dt, mouse);
+        // Reset the idle counter on any cursor motion; otherwise tick up.
+        if (mouse.active) settings.seconds_idle = 0.0f;
+        else              settings.seconds_idle += dt;
+        settings.wall_time = std::chrono::duration<float>(now - start_time).count();
+
+        if (keyPressed(esc_was, VK_ESCAPE)) { g_quit = true; break; }
+        if (keyPressed(m_was, 'M')) {
+            settings.mode = nextMode(settings.mode);
+            printf("[mode]  %s\n", visualModeName(settings.mode));
+        }
+        if (keyPressed(b_was, 'B')) {
+            settings.bloom_enabled = !settings.bloom_enabled;
+            printf("[bloom] %s\n", settings.bloom_enabled ? "on" : "off");
+        }
+        if (keyPressed(i_was, 'I')) {
+            settings.idle_enabled = !settings.idle_enabled;
+            printf("[idle]  %s\n", settings.idle_enabled ? "on" : "off");
+        }
+        if (keyPressed(c_was, 'C')) {
+            cuda.clear();
+            printf("[clear] simulation reset\n");
+        }
+
+        cuda.render(dt, mouse, settings);
         renderer.render();
     }
 

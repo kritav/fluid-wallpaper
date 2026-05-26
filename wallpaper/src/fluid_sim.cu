@@ -19,11 +19,17 @@ namespace tuning {
 constexpr float VISCOSITY        = 0.00001f;   // mild velocity diffusion
 constexpr float DENSITY_DECAY    = 0.997f;     // per-frame multiplicative fade
 constexpr float VELOCITY_DECAY   = 0.999f;     // bleeds off kinetic energy that would otherwise accumulate and periodically blow up the solver
-constexpr float MOUSE_FORCE      = 500.0f;     // dx in [0,1] -> velocity bump
-constexpr float MOUSE_DENSITY    = 1.5f;       // dye added per moving frame
-constexpr float INJECTION_RADIUS = 0.03f;      // gaussian sigma, normalized
+// Phase 4: tone mapping (density / (1+density)) lets us inject much more
+// dye without saturating, so MOUSE_DENSITY is up; MOUSE_FORCE comes down
+// because the prior 500 was tuned against a linear renderer that needed
+// strong sweeps to look like anything.
+constexpr float MOUSE_FORCE      = 200.0f;     // dx in [0,1] -> velocity bump
+constexpr float MOUSE_DENSITY    = 4.0f;       // dye added per moving frame
+constexpr float INJECTION_RADIUS = 0.025f;     // gaussian sigma, normalized
 constexpr int   DIFFUSION_ITERS  = 20;
 constexpr int   PRESSURE_ITERS   = 80;
+constexpr float IDLE_FORCE       = 12.0f;      // much weaker than mouse
+constexpr float IDLE_DENSITY     = 0.4f;       // tiny per-frame dye nudge
 }  // namespace tuning
 
 namespace {
@@ -336,10 +342,88 @@ __global__ void decayVelocityKernel(
     surf2Dwrite(vy * decay, velYSurf, x * static_cast<int>(sizeof(float)), y);
 }
 
-__global__ void renderDensityKernel(
+// --- Tone mapping + colormaps ---------------------------------------------
+//
+// All colormap fns take t in [0,1] and return RGB in [0,1]. Approximations
+// of matplotlib palettes — close enough for visuals, far cheaper than the
+// exact polynomial fits.
+
+__device__ inline float clamp01(float x) {
+    return fminf(fmaxf(x, 0.0f), 1.0f);
+}
+
+// density / (1+density) — automatic Reinhard-style soft saturation. d=1 maps
+// to 0.5, d=10 to ~0.91. Keeps the cursor center from instantly going white.
+__device__ inline float toneMapDensity(float d) {
+    d = fmaxf(d, 0.0f);
+    return d / (1.0f + d);
+}
+
+__device__ inline float3 plasma(float t) {
+    t = clamp01(t);
+    float r = 0.05f + t * (2.5f - t * 1.4f);
+    float g = -0.1f + t * t * 1.2f;
+    float b = 0.5f + t * (0.6f - t * 1.1f);
+    return make_float3(clamp01(r), clamp01(g), clamp01(b));
+}
+
+__device__ inline float3 inferno(float t) {
+    t = clamp01(t);
+    float r = fminf(t * 2.0f, 1.0f);
+    float g = fmaxf(0.0f, t * 1.5f - 0.4f);
+    g = fminf(g * g, 1.0f);
+    float b = fmaxf(0.0f, t * t * t - 0.2f);
+    return make_float3(r, g, b);
+}
+
+__device__ inline float3 viridis(float t) {
+    t = clamp01(t);
+    float r = fmaxf(0.0f, t * 1.5f - 0.3f);
+    r = r * r;
+    float g = t * 0.8f + 0.1f;
+    float b = 0.4f - t * 0.4f + (1.0f - t) * 0.3f;
+    return make_float3(clamp01(r), clamp01(g), clamp01(b));
+}
+
+__device__ inline float3 cool(float t) {
+    t = clamp01(t);
+    return make_float3(t, 1.0f - t, 1.0f);
+}
+
+// Standard HSV→RGB. h, s, v all in [0,1]. Caller guarantees s>0 for the
+// velocity-colored mode; we don't bother with the s=0 edge case here.
+__device__ inline float3 hsvToRgb(float h, float s, float v) {
+    float h6 = h * 6.0f;
+    float c  = v * s;
+    float x  = c * (1.0f - fabsf(fmodf(h6, 2.0f) - 1.0f));
+    float r = 0, g = 0, b = 0;
+    if      (h6 < 1.0f) { r = c; g = x; b = 0; }
+    else if (h6 < 2.0f) { r = x; g = c; b = 0; }
+    else if (h6 < 3.0f) { r = 0; g = c; b = x; }
+    else if (h6 < 4.0f) { r = 0; g = x; b = c; }
+    else if (h6 < 5.0f) { r = x; g = 0; b = c; }
+    else                { r = c; g = 0; b = x; }
+    float m = v - c;
+    return make_float3(r + m, g + m, b + m);
+}
+
+__device__ inline uchar4 packRgba(float3 rgb) {
+    return make_uchar4(
+        static_cast<unsigned char>(clamp01(rgb.x) * 255.0f),
+        static_cast<unsigned char>(clamp01(rgb.y) * 255.0f),
+        static_cast<unsigned char>(clamp01(rgb.z) * 255.0f),
+        255);
+}
+
+// Unified render kernel — every thread takes the same `mode` branch so the
+// dispatch is uniform; no warp divergence cost.
+__global__ void renderKernel(
     cudaTextureObject_t densityTex,
+    cudaTextureObject_t velXTex,
+    cudaTextureObject_t velYTex,
     cudaSurfaceObject_t outputSurf,
-    int outW, int outH)
+    int outW, int outH,
+    VisualMode mode)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -349,12 +433,113 @@ __global__ void renderDensityKernel(
     // sim-grid → display-resolution upsample for free.
     float u = (x + 0.5f) / outW;
     float v = (y + 0.5f) / outH;
-    float d = tex2D<float>(densityTex, u, v);
 
-    float val = fminf(fmaxf(d, 0.0f), 1.0f);
-    unsigned char c = static_cast<unsigned char>(val * 255.0f);
-    uchar4 px = make_uchar4(c, c, c, 255);
-    surf2Dwrite(px, outputSurf, x * static_cast<int>(sizeof(uchar4)), y);
+    float3 rgb;
+    switch (mode) {
+        case VisualMode::DensityPlasma: {
+            float t = toneMapDensity(tex2D<float>(densityTex, u, v));
+            rgb = plasma(t);
+            break;
+        }
+        case VisualMode::DensityInferno: {
+            float t = toneMapDensity(tex2D<float>(densityTex, u, v));
+            rgb = inferno(t);
+            break;
+        }
+        case VisualMode::DensityViridis: {
+            float t = toneMapDensity(tex2D<float>(densityTex, u, v));
+            rgb = viridis(t);
+            break;
+        }
+        case VisualMode::DensityCool: {
+            float t = toneMapDensity(tex2D<float>(densityTex, u, v));
+            rgb = cool(t);
+            break;
+        }
+        case VisualMode::Velocity: {
+            float vx = tex2D<float>(velXTex, u, v);
+            float vy = tex2D<float>(velYTex, u, v);
+            float speed = sqrtf(vx*vx + vy*vy);
+            float t = speed / (speed + 1.0f);
+            rgb = inferno(t);
+            break;
+        }
+        case VisualMode::VelocityColored: {
+            float vx = tex2D<float>(velXTex, u, v);
+            float vy = tex2D<float>(velYTex, u, v);
+            float speed = sqrtf(vx*vx + vy*vy);
+            float angle = atan2f(vy, vx);                 // -π..π
+            float hue   = (angle + 3.14159265f) * (1.0f / 6.28318531f);
+            float brt   = speed / (speed + 1.0f);
+            rgb = hsvToRgb(hue, 1.0f, brt);
+            break;
+        }
+        default:
+            rgb = make_float3(0, 0, 0);
+            break;
+    }
+    surf2Dwrite(packRgba(rgb), outputSurf, x * static_cast<int>(sizeof(uchar4)), y);
+}
+
+// Idle perturbation: three slow-moving Gaussian "fountains" that gently swirl
+// the velocity field and dribble a trickle of dye. Tuned to be obvious only
+// after a few seconds of watching — closer to background motion than a forced
+// animation. Strength is tiny vs. addForceKernel so mouse input still
+// dominates the moment the user wiggles.
+__global__ void idlePerturbationKernel(
+    cudaSurfaceObject_t velXSurf,
+    cudaSurfaceObject_t velYSurf,
+    cudaSurfaceObject_t densSurf,
+    int width, int height, float time)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    float u = (x + 0.5f) / width;
+    float v = (y + 0.5f) / height;
+
+    float totalFX = 0.0f, totalFY = 0.0f, totalD = 0.0f;
+    const float radius = 0.06f;
+    const float invR2  = 1.0f / (radius * radius);
+
+    #pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        float seed = i * 2.391f;
+        // Two incommensurate frequencies per axis to avoid repeating patterns
+        // on a short period.
+        float px = 0.5f + 0.32f * sinf(time * 0.13f + seed);
+        float py = 0.5f + 0.32f * cosf(time * 0.17f + seed * 1.5f);
+        float dx = u - px;
+        float dy = v - py;
+        float distSq  = dx * dx + dy * dy;
+        float falloff = expf(-distSq * invR2);
+        if (falloff < 1e-3f) continue;
+
+        // Swirl: tangential is (-dy, dx); flip sign every other fountain so
+        // the three sources don't all rotate the same way.
+        float swirlDir = (i & 1) ? -1.0f : 1.0f;
+        float angle = time * 0.4f + seed;
+        float fx = -dy * swirlDir * 8.0f + sinf(angle) * 1.5f;
+        float fy =  dx * swirlDir * 8.0f + cosf(angle) * 1.5f;
+
+        totalFX += fx * falloff * tuning::IDLE_FORCE;
+        totalFY += fy * falloff * tuning::IDLE_FORCE;
+        totalD  += falloff * tuning::IDLE_DENSITY;
+    }
+
+    if (fabsf(totalFX) < 1e-5f && fabsf(totalFY) < 1e-5f && totalD < 1e-5f) return;
+
+    float vx, vy, d;
+    surf2Dread(&vx, velXSurf, x * static_cast<int>(sizeof(float)), y);
+    surf2Dread(&vy, velYSurf, x * static_cast<int>(sizeof(float)), y);
+    surf2Dread(&d,  densSurf, x * static_cast<int>(sizeof(float)), y);
+    vx += totalFX;
+    vy += totalFY;
+    d  += totalD;
+    surf2Dwrite(vx, velXSurf, x * static_cast<int>(sizeof(float)), y);
+    surf2Dwrite(vy, velYSurf, x * static_cast<int>(sizeof(float)), y);
+    surf2Dwrite(d,  densSurf, x * static_cast<int>(sizeof(float)), y);
 }
 
 // ---------------------------------------------------------------------------
@@ -470,9 +655,37 @@ void stepSimulation(SimState& s, const MouseInput& mouse, float dt) {
         s.width, s.height, tuning::VELOCITY_DECAY);
 }
 
-void renderDensityToOutput(const Field& density,
-                           cudaSurfaceObject_t outputSurf,
-                           int outputWidth, int outputHeight) {
-    renderDensityKernel<<<launchGrid(outputWidth, outputHeight), BLOCK>>>(
-        density.texObj, outputSurf, outputWidth, outputHeight);
+void injectIdlePerturbation(SimState& s, float wall_time) {
+    idlePerturbationKernel<<<launchGrid(s.width, s.height), BLOCK>>>(
+        s.velX.surfObj, s.velY.surfObj, s.density.surfObj,
+        s.width, s.height, wall_time);
+}
+
+void renderSimToOutput(const SimState& s,
+                       cudaSurfaceObject_t outputSurf,
+                       int outputWidth, int outputHeight,
+                       VisualMode mode) {
+    renderKernel<<<launchGrid(outputWidth, outputHeight), BLOCK>>>(
+        s.density.texObj, s.velX.texObj, s.velY.texObj,
+        outputSurf, outputWidth, outputHeight, mode);
+}
+
+void clearSimState(SimState& s) {
+    clearField(s.velX);         clearField(s.velX_tmp);
+    clearField(s.velY);         clearField(s.velY_tmp);
+    clearField(s.density);      clearField(s.density_tmp);
+    clearField(s.pressure);     clearField(s.pressure_tmp);
+    clearField(s.divergence);   clearField(s.scratch);
+}
+
+const char* visualModeName(VisualMode m) {
+    switch (m) {
+        case VisualMode::DensityPlasma:   return "Density / Plasma";
+        case VisualMode::DensityInferno:  return "Density / Inferno";
+        case VisualMode::DensityViridis:  return "Density / Viridis";
+        case VisualMode::DensityCool:     return "Density / Cool";
+        case VisualMode::Velocity:        return "Velocity magnitude";
+        case VisualMode::VelocityColored: return "Velocity (direction colored)";
+        default:                          return "Unknown";
+    }
 }
