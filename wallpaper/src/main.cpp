@@ -93,10 +93,12 @@ int main(int argc, char** argv) {
         const auto now = std::chrono::steady_clock::now();
         float dt = std::chrono::duration<float>(now - last_time).count();
         last_time = now;
-        // Clamp dt so a hitch (debugger pause, window drag) doesn't fire a
-        // huge advection step that NaNs the velocity field.
-        dt = std::clamp(dt, 0.001f, 0.05f);
-
+        // Clamp dt tight: above 1/60s a single advection step can blow up
+        // the stable-fluids solver (manifests as bright sludge sliding to
+        // a corner before dissipation pulls it back). Cap at one 60 Hz
+        // frame even if rendering hitches; floor avoids degenerate zero.
+        dt = std::clamp(dt, 1.0f / 240.0f, 1.0f / 60.0f);
+        dt = fminf(dt, 1.0f / 60.0f);
         updateMouseState();
         MouseInput mouse = getMouseInput(width, height);
 

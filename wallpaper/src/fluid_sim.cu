@@ -18,11 +18,12 @@
 namespace tuning {
 constexpr float VISCOSITY        = 0.00001f;   // mild velocity diffusion
 constexpr float DENSITY_DECAY    = 0.997f;     // per-frame multiplicative fade
+constexpr float VELOCITY_DECAY   = 0.999f;     // bleeds off kinetic energy that would otherwise accumulate and periodically blow up the solver
 constexpr float MOUSE_FORCE      = 500.0f;     // dx in [0,1] -> velocity bump
 constexpr float MOUSE_DENSITY    = 1.5f;       // dye added per moving frame
 constexpr float INJECTION_RADIUS = 0.03f;      // gaussian sigma, normalized
 constexpr int   DIFFUSION_ITERS  = 20;
-constexpr int   PRESSURE_ITERS   = 40;
+constexpr int   PRESSURE_ITERS   = 80;
 }  // namespace tuning
 
 namespace {
@@ -319,6 +320,22 @@ __global__ void dissipateKernel(
     surf2Dwrite(d * decay, densSurf, x * static_cast<int>(sizeof(float)), y);
 }
 
+__global__ void decayVelocityKernel(
+    cudaSurfaceObject_t velXSurf,
+    cudaSurfaceObject_t velYSurf,
+    int width, int height, float decay)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    float vx, vy;
+    surf2Dread(&vx, velXSurf, x * static_cast<int>(sizeof(float)), y);
+    surf2Dread(&vy, velYSurf, x * static_cast<int>(sizeof(float)), y);
+    surf2Dwrite(vx * decay, velXSurf, x * static_cast<int>(sizeof(float)), y);
+    surf2Dwrite(vy * decay, velYSurf, x * static_cast<int>(sizeof(float)), y);
+}
+
 __global__ void renderDensityKernel(
     cudaTextureObject_t densityTex,
     cudaSurfaceObject_t outputSurf,
@@ -398,7 +415,7 @@ void stepSimulation(SimState& s, const MouseInput& mouse, float dt) {
     dim3 grid = launchGrid(s.width, s.height);
 
     // 1. Mouse forces (velocity impulse + dye splat) — only when the cursor
-    //    moves, so an idle desktop doesn't fill up with dye.
+    //    moves.
     if (mouse.active) {
         float fx = mouse.dx * tuning::MOUSE_FORCE;
         float fy = mouse.dy * tuning::MOUSE_FORCE;
@@ -434,9 +451,7 @@ void stepSimulation(SimState& s, const MouseInput& mouse, float dt) {
     swapFields(s.velX, s.velX_tmp);
     swapFields(s.velY, s.velY_tmp);
 
-    // 5. Project again — advection reintroduces a small amount of
-    //    divergence that we need to scrub before the density step samples
-    //    the velocity field.
+    // 5. Project again
     projectVelocity(s);
 
     // 6. Advect density along the now-clean velocity field.
@@ -445,10 +460,14 @@ void stepSimulation(SimState& s, const MouseInput& mouse, float dt) {
         s.width, s.height, dt);
     swapFields(s.density, s.density_tmp);
 
-    // 7. Multiplicative density decay so the wallpaper doesn't saturate
-    //    after a minute of mouse waving.
+    // 7. Multiplicative density decay
     dissipateKernel<<<grid, BLOCK>>>(
         s.density.surfObj, s.width, s.height, tuning::DENSITY_DECAY);
+
+    // 8. Velocity decay.
+    decayVelocityKernel<<<grid, BLOCK>>>(
+        s.velX.surfObj, s.velY.surfObj,
+        s.width, s.height, tuning::VELOCITY_DECAY);
 }
 
 void renderDensityToOutput(const Field& density,
