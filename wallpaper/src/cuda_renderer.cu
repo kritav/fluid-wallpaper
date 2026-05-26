@@ -5,6 +5,8 @@
 #include <d3d11.h>
 #include <cstdio>
 
+#include "input.h"
+
 #define CUDA_CHECK(call) do {                                              \
     cudaError_t _err = (call);                                             \
     if (_err != cudaSuccess) {                                             \
@@ -13,42 +15,26 @@
     }                                                                      \
 } while (0)
 
-// Placeholder Phase-2 kernel: animated plasma into the shared surface.
-// Phase 3 replaces this with the fluid sim's density write-out.
-__global__ void animated_kernel(cudaSurfaceObject_t surface,
-                                int width, int height, float time)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-
-    float u = (float)x / (float)width;
-    float v = (float)y / (float)height;
-
-    float r = 0.5f + 0.5f * sinf(u * 10.0f + time);
-    float g = 0.5f + 0.5f * sinf(v * 10.0f + time * 1.3f);
-    float b = 0.5f + 0.5f * sinf((u + v) * 8.0f + time * 0.7f);
-
-    uchar4 color = make_uchar4(
-        (unsigned char)(r * 255.0f),
-        (unsigned char)(g * 255.0f),
-        (unsigned char)(b * 255.0f),
-        255);
-
-    // surf2Dwrite takes a byte offset for x, not a texel index.
-    surf2Dwrite(color, surface, x * (int)sizeof(uchar4), y);
+// Phase 3 sim grid resolution. Display resolution is independent and passed
+// at init() time; the render kernel upsamples via hardware bilinear filter.
+// 512^2 hits the 60 FPS target on a Turing+ GPU with comfortable headroom.
+namespace {
+constexpr int SIM_WIDTH  = 512;
+constexpr int SIM_HEIGHT = 512;
 }
 
 CudaRenderer::~CudaRenderer() {
+    destroySimState(sim_);
     if (resource_) {
         cudaGraphicsUnregisterResource(resource_);
         resource_ = nullptr;
     }
 }
 
-bool CudaRenderer::init(ID3D11Texture2D* shared_texture, int width, int height) {
-    width_  = width;
-    height_ = height;
+bool CudaRenderer::init(ID3D11Texture2D* shared_texture,
+                        int display_width, int display_height) {
+    display_width_  = display_width;
+    display_height_ = display_height;
 
     // Known issue, deferred: on multi-GPU systems CUDA may pick a different
     // device than DXGI. The fix is to read the DXGI adapter LUID and call
@@ -62,27 +48,37 @@ bool CudaRenderer::init(ID3D11Texture2D* shared_texture, int width, int height) 
         resource_ = nullptr;
         return false;
     }
+
+    if (!createSimState(sim_, SIM_WIDTH, SIM_HEIGHT)) {
+        fprintf(stderr, "createSimState failed\n");
+        return false;
+    }
     return true;
 }
 
-void CudaRenderer::render(float time_seconds) {
+void CudaRenderer::render(float dt, const MouseInput& mouse) {
+    // 1. Advance the simulation. All work on private CUDA arrays — does not
+    //    touch the DX11 texture.
+    stepSimulation(sim_, mouse, dt);
+
+    // 2. Map the DX11 shared texture and write the density grid into it.
+    //    The cudaArray pointer is only valid between Map/Unmap, so the
+    //    output surface object is built and torn down each frame.
     CUDA_CHECK(cudaGraphicsMapResources(1, &resource_));
 
-    cudaArray_t array = nullptr;
-    CUDA_CHECK(cudaGraphicsSubResourceGetMappedArray(&array, resource_, 0, 0));
+    cudaArray_t out_array = nullptr;
+    CUDA_CHECK(cudaGraphicsSubResourceGetMappedArray(&out_array, resource_, 0, 0));
 
-    cudaResourceDesc res_desc{};
-    res_desc.resType         = cudaResourceTypeArray;
-    res_desc.res.array.array = array;
+    cudaResourceDesc rd{};
+    rd.resType         = cudaResourceTypeArray;
+    rd.res.array.array = out_array;
 
-    cudaSurfaceObject_t surface = 0;
-    CUDA_CHECK(cudaCreateSurfaceObject(&surface, &res_desc));
+    cudaSurfaceObject_t out_surf = 0;
+    CUDA_CHECK(cudaCreateSurfaceObject(&out_surf, &rd));
 
-    dim3 block(16, 16);
-    dim3 grid((width_  + block.x - 1) / block.x,
-              (height_ + block.y - 1) / block.y);
-    animated_kernel<<<grid, block>>>(surface, width_, height_, time_seconds);
+    renderDensityToOutput(sim_.density, out_surf,
+                          display_width_, display_height_);
 
-    CUDA_CHECK(cudaDestroySurfaceObject(surface));
+    CUDA_CHECK(cudaDestroySurfaceObject(out_surf));
     CUDA_CHECK(cudaGraphicsUnmapResources(1, &resource_));
 }

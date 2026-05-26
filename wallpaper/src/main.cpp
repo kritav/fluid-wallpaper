@@ -1,9 +1,11 @@
 #include <windows.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 
 #include "cuda_renderer.h"
+#include "input.h"
 #include "renderer.h"
 #include "wallpaper.h"
 
@@ -72,9 +74,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("Running at %dx%d. Close this console to exit.\n", width, height);
+    printf("Running at %dx%d. Move your mouse to inject fluid. "
+           "Close this console to exit.\n", width, height);
 
-    const auto start = std::chrono::steady_clock::now();
+    auto last_time = std::chrono::steady_clock::now();
     MSG msg{};
     while (!g_quit) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -88,8 +91,16 @@ int main(int argc, char** argv) {
         if (g_quit) break;
 
         const auto now = std::chrono::steady_clock::now();
-        const float t  = std::chrono::duration<float>(now - start).count();
-        cuda.render(t);
+        float dt = std::chrono::duration<float>(now - last_time).count();
+        last_time = now;
+        // Clamp dt so a hitch (debugger pause, window drag) doesn't fire a
+        // huge advection step that NaNs the velocity field.
+        dt = std::clamp(dt, 0.001f, 0.05f);
+
+        updateMouseState();
+        MouseInput mouse = getMouseInput(width, height);
+
+        cuda.render(dt, mouse);
         renderer.render();
     }
 

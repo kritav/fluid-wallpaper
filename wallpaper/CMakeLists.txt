@@ -13,6 +13,8 @@ add_executable(fluid-wallpaper
     src/wallpaper.cpp
     src/renderer.cpp
     src/cuda_renderer.cu
+    src/fluid_sim.cu
+    src/input.cpp
 )
 
 # Turing (75), Ampere (80, 86), Ada (89), Hopper (90). Drop the highest
