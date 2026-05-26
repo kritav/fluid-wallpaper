@@ -65,7 +65,7 @@ void stepSimulation(SimState& s, const MouseInput& mouse, float dt);
 // Inject a few small swirling "fountains" that slowly drift around the grid.
 // Drives gentle motion when the user isn't moving the mouse. wall_time is
 // total elapsed seconds since launch — used to animate the fountain centers.
-void injectIdlePerturbation(SimState& s, float wall_time);
+void injectIdlePerturbation(SimState& s, float wall_time, float dt);
 
 // Read the simulation fields, tone-map and colormap according to `mode`,
 // upsample to display resolution, write RGBA8 to the DX11 shared texture.

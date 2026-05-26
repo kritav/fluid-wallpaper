@@ -28,8 +28,11 @@ constexpr float MOUSE_DENSITY    = 4.0f;       // dye added per moving frame
 constexpr float INJECTION_RADIUS = 0.025f;     // gaussian sigma, normalized
 constexpr int   DIFFUSION_ITERS  = 20;
 constexpr int   PRESSURE_ITERS   = 80;
-constexpr float IDLE_FORCE       = 12.0f;      // much weaker than mouse
-constexpr float IDLE_DENSITY     = 0.4f;       // tiny per-frame dye nudge
+// Both are *per-second* rates — the kernel multiplies by dt. Earlier values
+// were per-frame, which at 60 Hz pumped enough velocity in to push the
+// solver past its stability bound after a couple of seconds.
+constexpr float IDLE_FORCE       = 1.5f;       // peak velocity injected/sec
+constexpr float IDLE_DENSITY     = 0.2f;       // peak dye injected/sec
 }  // namespace tuning
 
 namespace {
@@ -490,7 +493,7 @@ __global__ void idlePerturbationKernel(
     cudaSurfaceObject_t velXSurf,
     cudaSurfaceObject_t velYSurf,
     cudaSurfaceObject_t densSurf,
-    int width, int height, float time)
+    int width, int height, float time, float dt)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -502,12 +505,13 @@ __global__ void idlePerturbationKernel(
     float totalFX = 0.0f, totalFY = 0.0f, totalD = 0.0f;
     const float radius = 0.06f;
     const float invR2  = 1.0f / (radius * radius);
+    const float invR   = 1.0f / radius;
 
     #pragma unroll
     for (int i = 0; i < 3; ++i) {
         float seed = i * 2.391f;
-        // Two incommensurate frequencies per axis to avoid repeating patterns
-        // on a short period.
+        // Two incommensurate frequencies per axis so the orbit doesn't
+        // repeat on a short period.
         float px = 0.5f + 0.32f * sinf(time * 0.13f + seed);
         float py = 0.5f + 0.32f * cosf(time * 0.17f + seed * 1.5f);
         float dx = u - px;
@@ -516,27 +520,32 @@ __global__ void idlePerturbationKernel(
         float falloff = expf(-distSq * invR2);
         if (falloff < 1e-3f) continue;
 
-        // Swirl: tangential is (-dy, dx); flip sign every other fountain so
-        // the three sources don't all rotate the same way.
+        // Pure tangential swirl, normalized so |force| peaks near 1 inside
+        // the falloff zone. No constant-direction term — that adds net
+        // momentum the pressure projection can't cancel, which is what made
+        // the wallpaper drift uniformly into a corner.
         float swirlDir = (i & 1) ? -1.0f : 1.0f;
-        float angle = time * 0.4f + seed;
-        float fx = -dy * swirlDir * 8.0f + sinf(angle) * 1.5f;
-        float fy =  dx * swirlDir * 8.0f + cosf(angle) * 1.5f;
-
-        totalFX += fx * falloff * tuning::IDLE_FORCE;
-        totalFY += fy * falloff * tuning::IDLE_FORCE;
-        totalD  += falloff * tuning::IDLE_DENSITY;
+        totalFX += -dy * invR * swirlDir * falloff;
+        totalFY +=  dx * invR * swirlDir * falloff;
+        totalD  += falloff;
     }
 
     if (fabsf(totalFX) < 1e-5f && fabsf(totalFY) < 1e-5f && totalD < 1e-5f) return;
+
+    // dt-scaled: tuning constants are per-second rates. Without this the
+    // per-frame bumps integrate to ~24 units/sec of injected velocity at
+    // 60 Hz, well past the advection-stability bound.
+    float dvx = totalFX * tuning::IDLE_FORCE   * dt;
+    float dvy = totalFY * tuning::IDLE_FORCE   * dt;
+    float dd  = totalD  * tuning::IDLE_DENSITY * dt;
 
     float vx, vy, d;
     surf2Dread(&vx, velXSurf, x * static_cast<int>(sizeof(float)), y);
     surf2Dread(&vy, velYSurf, x * static_cast<int>(sizeof(float)), y);
     surf2Dread(&d,  densSurf, x * static_cast<int>(sizeof(float)), y);
-    vx += totalFX;
-    vy += totalFY;
-    d  += totalD;
+    vx += dvx;
+    vy += dvy;
+    d  += dd;
     surf2Dwrite(vx, velXSurf, x * static_cast<int>(sizeof(float)), y);
     surf2Dwrite(vy, velYSurf, x * static_cast<int>(sizeof(float)), y);
     surf2Dwrite(d,  densSurf, x * static_cast<int>(sizeof(float)), y);
@@ -655,10 +664,10 @@ void stepSimulation(SimState& s, const MouseInput& mouse, float dt) {
         s.width, s.height, tuning::VELOCITY_DECAY);
 }
 
-void injectIdlePerturbation(SimState& s, float wall_time) {
+void injectIdlePerturbation(SimState& s, float wall_time, float dt) {
     idlePerturbationKernel<<<launchGrid(s.width, s.height), BLOCK>>>(
         s.velX.surfObj, s.velY.surfObj, s.density.surfObj,
-        s.width, s.height, wall_time);
+        s.width, s.height, wall_time, dt);
 }
 
 void renderSimToOutput(const SimState& s,

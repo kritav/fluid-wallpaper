@@ -237,7 +237,7 @@ void CudaRenderer::render(float dt, const MouseInput& mouse,
     // 1. Idle perturbation (before the step so it propagates through diffuse
     //    + project in the same frame). Threshold is hard-coded at 3 seconds.
     if (settings.idle_enabled && settings.seconds_idle > 3.0f) {
-        injectIdlePerturbation(sim_, settings.wall_time);
+        injectIdlePerturbation(sim_, settings.wall_time, dt);
     }
 
     // 2. Advance the simulation. All work on private CUDA arrays — does not
