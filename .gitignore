@@ -19,6 +19,9 @@ CMakeUserPresets.json
 cmake_install.cmake
 Makefile
 
+# Inno Setup installer build output (generated setup .exe)
+installer/output/
+
 # Python
 __pycache__/
 *.pyc
