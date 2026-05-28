@@ -3,9 +3,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 
 #include "cuda_renderer.h"
 #include "input.h"
+#include "power.h"
 #include "renderer.h"
 #include "wallpaper.h"
 
@@ -90,6 +92,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Monitor-power notifications are delivered to a hidden message-only
+    // window owned by power.cpp. The wallpaper window is a WS_CHILD of
+    // WorkerW, so it can't reliably receive WM_POWERBROADCAST itself.
+    if (!power::register_notifications()) {
+        fprintf(stderr, "power::register_notifications failed (continuing "
+                        "without monitor-state detection)\n");
+    }
+
     printf("Running at %dx%d.\n", width, height);
     printf("Hotkeys: M=mode  B=bloom  I=idle  C=clear  Esc=quit\n");
 
@@ -104,6 +114,8 @@ int main(int argc, char** argv) {
     auto last_time  = start_time;
     MSG msg{};
     while (!g_quit) {
+        auto frame_start = std::chrono::steady_clock::now();
+
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) {
                 g_quit = true;
@@ -149,10 +161,30 @@ int main(int argc, char** argv) {
             printf("[clear] simulation reset\n");
         }
 
-        cuda.render(dt, mouse, settings);
-        renderer.render();
+        power::poll();
+
+        // Skip both sim and render when nobody can see us. DX11's flip
+        // swap chain holds the last presented frame, so the desktop keeps
+        // showing the most recent image without us doing anything.
+        if (!power::should_skip_simulation()) {
+            cuda.render(dt, mouse, settings);
+        }
+        if (!power::should_skip_render()) {
+            renderer.render();
+        }
+
+        // Explicit frame pacing. With vsync disabled in Present() this is
+        // the only thing keeping us at 60 FPS; on a 144 Hz monitor without
+        // this we'd happily render 144 frames/sec for no benefit. When
+        // obscured/paused the target stretches to 200–500 ms.
+        auto target  = power::target_frame_time();
+        auto elapsed = std::chrono::steady_clock::now() - frame_start;
+        if (elapsed < target) {
+            std::this_thread::sleep_for(target - elapsed);
+        }
     }
 
+    power::unregister_notifications();
     DestroyWindow(hwnd);
     return 0;
 }

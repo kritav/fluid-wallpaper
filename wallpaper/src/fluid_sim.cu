@@ -521,9 +521,7 @@ __global__ void idlePerturbationKernel(
         if (falloff < 1e-3f) continue;
 
         // Pure tangential swirl, normalized so |force| peaks near 1 inside
-        // the falloff zone. No constant-direction term — that adds net
-        // momentum the pressure projection can't cancel, which is what made
-        // the wallpaper drift uniformly into a corner.
+        // the falloff zone. No constant-direction term
         float swirlDir = (i & 1) ? -1.0f : 1.0f;
         totalFX += -dy * invR * swirlDir * falloff;
         totalFY +=  dx * invR * swirlDir * falloff;

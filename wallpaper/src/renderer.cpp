@@ -180,5 +180,8 @@ void Renderer::render() {
     ID3D11ShaderResourceView* null_srv[] = {nullptr};
     context_->PSSetShaderResources(0, 1, null_srv);
 
-    swap_chain_->Present(1, 0);  // vsync
+    // SyncInterval=0: present immediately, no vsync wait. Frame pacing is
+    // handled explicitly in main.cpp so the loop can hit 60 FPS regardless
+    // of monitor refresh rate (and drop to 5/2 FPS when obscured/paused).
+    swap_chain_->Present(0, 0);
 }

@@ -15,6 +15,7 @@ add_executable(fluid-wallpaper
     src/cuda_renderer.cu
     src/fluid_sim.cu
     src/input.cpp
+    src/power.cpp
 )
 
 # Turing (75), Ampere (80, 86), Ada (89), Hopper (90). Drop the highest
@@ -30,6 +31,7 @@ target_link_libraries(fluid-wallpaper PRIVATE
     d3d11
     dxgi
     d3dcompiler
+    shell32    # SHQueryUserNotificationState
     CUDA::cudart
 )
 
