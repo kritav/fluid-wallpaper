@@ -4,6 +4,9 @@ Real-time CUDA fluid simulation as a Windows desktop wallpaper. The fluid reacts
 
 [![Download](https://img.shields.io/github/v/release/kritav/fluid-wallpaper)](https://github.com/kritav/fluid-wallpaper/releases/latest)
 
+
+![Fluid Wallpaper — velocity-colored mode reacting to the cursor](docs/demo.gif)
+
 ## Download
 
 Get the latest installer from the [Releases page](https://github.com/kritav/fluid-wallpaper/releases) and run it. No admin rights needed; the installer drops the app into your per-user Programs folder.
