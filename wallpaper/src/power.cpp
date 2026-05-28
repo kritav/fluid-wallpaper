@@ -85,7 +85,27 @@ bool desktop_fully_obscured() {
             r.bottom >= mi.rcMonitor.bottom);
 }
 
+bool foreground_is_shell() {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return true;  // no app foreground → treat as the desktop/shell
+    wchar_t cls[256] = {0};
+    GetClassNameW(fg, cls, 256);
+    return wcscmp(cls, L"Progman") == 0
+        || wcscmp(cls, L"WorkerW") == 0
+        || wcscmp(cls, L"Shell_TrayWnd") == 0
+        || wcscmp(cls, L"FluidWallpaperWindow") == 0;
+}
+
 bool fullscreen_app_running() {
+    // Guard the desktop false-positive: SHQueryUserNotificationState reports a
+    // busy / full-screen state whenever the *foreground window* is full-screen,
+    // and the Windows desktop (Progman) is itself a full-screen window. Without
+    // this check, clicking onto the desktop made the API say "fullscreen app
+    // running", which paused the wallpaper exactly when it should be visible
+    // (and it resumed when a normal windowed app was focused — the inverted
+    // freeze). A real fullscreen app is never the shell, so bail out first.
+    if (foreground_is_shell()) return false;
+
     QUERY_USER_NOTIFICATION_STATE state;
     HRESULT hr = SHQueryUserNotificationState(&state);
     if (FAILED(hr)) return false;

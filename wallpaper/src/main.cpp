@@ -37,6 +37,21 @@ bool keyPressed(bool& was_down, int vk) {
     return pressed;
 }
 
+// GetAsyncKeyState is process-global — it reports keys pressed in *any* app,
+// not just when the desktop is active. Without this gate, typing "M"/"B"/"C"
+// in another window (e.g. a browser) would cycle the colormap, toggle bloom,
+// or clear the sim. Only act on hotkeys when the desktop shell is foreground;
+// the tray menu offers the same controls regardless of focus.
+bool desktopIsForeground() {
+    HWND fg = GetForegroundWindow();
+    if (!fg) return true;  // nothing focused → treat as the desktop
+    wchar_t cls[256] = {0};
+    GetClassNameW(fg, cls, 256);
+    return wcscmp(cls, L"Progman") == 0
+        || wcscmp(cls, L"WorkerW") == 0
+        || wcscmp(cls, L"FluidWallpaperWindow") == 0;
+}
+
 VisualMode nextMode(VisualMode m) {
     int n = static_cast<int>(m) + 1;
     if (n >= static_cast<int>(VisualMode::Count)) n = 0;
@@ -246,22 +261,32 @@ int main(int argc, char** argv) {
         else              settings.seconds_idle += dt;
         settings.wall_time = std::chrono::duration<float>(now - start_time).count();
 
-        if (keyPressed(esc_was, VK_ESCAPE)) { g_quit = true; break; }
-        if (keyPressed(m_was, 'M')) {
-            settings.mode = nextMode(settings.mode);
-            printf("[mode]  %s\n", visualModeName(settings.mode));
-        }
-        if (keyPressed(b_was, 'B')) {
-            settings.bloom_enabled = !settings.bloom_enabled;
-            printf("[bloom] %s\n", settings.bloom_enabled ? "on" : "off");
-        }
-        if (keyPressed(i_was, 'I')) {
-            settings.idle_enabled = !settings.idle_enabled;
-            printf("[idle]  %s\n", settings.idle_enabled ? "on" : "off");
-        }
-        if (keyPressed(c_was, 'C')) {
-            cuda.clear();
-            printf("[clear] simulation reset\n");
+        // Advance edge-detection every frame regardless of focus so a key
+        // held across a focus change can't fire a stale edge later; only act
+        // on the press when the desktop itself is foreground.
+        bool esc_p = keyPressed(esc_was, VK_ESCAPE);
+        bool m_p   = keyPressed(m_was, 'M');
+        bool b_p   = keyPressed(b_was, 'B');
+        bool i_p   = keyPressed(i_was, 'I');
+        bool c_p   = keyPressed(c_was, 'C');
+        if (desktopIsForeground()) {
+            if (esc_p) { g_quit = true; break; }
+            if (m_p) {
+                settings.mode = nextMode(settings.mode);
+                printf("[mode]  %s\n", visualModeName(settings.mode));
+            }
+            if (b_p) {
+                settings.bloom_enabled = !settings.bloom_enabled;
+                printf("[bloom] %s\n", settings.bloom_enabled ? "on" : "off");
+            }
+            if (i_p) {
+                settings.idle_enabled = !settings.idle_enabled;
+                printf("[idle]  %s\n", settings.idle_enabled ? "on" : "off");
+            }
+            if (c_p) {
+                cuda.clear();
+                printf("[clear] simulation reset\n");
+            }
         }
 
         // Tray menu reads these to draw checkmarks; sync before draining
