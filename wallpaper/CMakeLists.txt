@@ -7,7 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(CUDAToolkit REQUIRED)
 
 # Console-subsystem exe (no WIN32 flag) — Phase 1 keeps a console window
-# for logs and Ctrl+C exit. Phase 5 will turn this into a proper tray app.
+# for logs and Ctrl+C exit. The tray icon now provides the user-facing
+# control surface; the console remains for diagnostics.
 add_executable(fluid-wallpaper
     src/main.cpp
     src/wallpaper.cpp
@@ -16,6 +17,8 @@ add_executable(fluid-wallpaper
     src/fluid_sim.cu
     src/input.cpp
     src/power.cpp
+    src/tray.cpp
+    resources/app.rc
 )
 
 # Turing (75), Ampere (80, 86), Ada (89), Hopper (90). Drop the highest
@@ -25,13 +28,15 @@ set_target_properties(fluid-wallpaper PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
 )
 
-target_include_directories(fluid-wallpaper PRIVATE src)
+target_include_directories(fluid-wallpaper PRIVATE src resources)
 
 target_link_libraries(fluid-wallpaper PRIVATE
     d3d11
     dxgi
     d3dcompiler
-    shell32    # SHQueryUserNotificationState
+    shell32    # SHQueryUserNotificationState, Shell_NotifyIcon, ShellExecute
+    comctl32   # TaskDialogIndirect (About / first-run dialogs)
+    advapi32   # Registry (autostart toggle, first-run state)
     CUDA::cudart
 )
 

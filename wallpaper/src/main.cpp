@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <commctrl.h>  // TaskDialogIndirect for welcome / shortcuts dialogs
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -9,6 +10,7 @@
 #include "input.h"
 #include "power.h"
 #include "renderer.h"
+#include "tray.h"
 #include "wallpaper.h"
 
 namespace {
@@ -39,6 +41,88 @@ VisualMode nextMode(VisualMode m) {
     int n = static_cast<int>(m) + 1;
     if (n >= static_cast<int>(VisualMode::Count)) n = 0;
     return static_cast<VisualMode>(n);
+}
+
+// First-run state: REG_DWORD HasRunBefore under HKCU\Software\kritav\
+// FluidWallpaper. Uninstall removes the whole subkey, so reinstalling
+// triggers the welcome again.
+constexpr const wchar_t* FIRST_RUN_KEY   = L"Software\\kritav\\FluidWallpaper";
+constexpr const wchar_t* FIRST_RUN_VALUE = L"HasRunBefore";
+
+bool isFirstRun() {
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, FIRST_RUN_KEY, 0, KEY_QUERY_VALUE, &key)
+        != ERROR_SUCCESS) {
+        return true;
+    }
+    DWORD value = 0;
+    DWORD size  = sizeof(value);
+    LONG  r     = RegQueryValueExW(key, FIRST_RUN_VALUE, nullptr, nullptr,
+                                   reinterpret_cast<LPBYTE>(&value), &size);
+    RegCloseKey(key);
+    return r != ERROR_SUCCESS || value == 0;
+}
+
+void markFirstRunComplete() {
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, FIRST_RUN_KEY, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+        return;
+    }
+    DWORD value = 1;
+    RegSetValueExW(key, FIRST_RUN_VALUE, 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&value), sizeof(value));
+    RegCloseKey(key);
+}
+
+void showShortcutsDialog(HWND parent) {
+    TASKDIALOGCONFIG cfg{};
+    cfg.cbSize             = sizeof(cfg);
+    cfg.hwndParent         = parent;
+    cfg.hInstance          = GetModuleHandleW(nullptr);
+    cfg.dwFlags            = TDF_ALLOW_DIALOG_CANCELLATION;
+    cfg.pszMainIcon        = TD_INFORMATION_ICON;
+    cfg.pszWindowTitle     = L"Fluid Wallpaper Shortcuts";
+    cfg.pszMainInstruction = L"Keyboard shortcuts";
+    cfg.pszContent =
+        L"M  —  cycle visual mode (plasma / inferno / viridis / cool / "
+        L"velocity / velocity-colored)\n"
+        L"B  —  toggle bloom\n"
+        L"I  —  toggle idle motion\n"
+        L"C  —  clear the simulation\n"
+        L"Esc  —  quit\n\n"
+        L"All of the above are also in the tray icon's right-click menu.";
+    cfg.dwCommonButtons    = TDCBF_OK_BUTTON;
+    TaskDialogIndirect(&cfg, nullptr, nullptr, nullptr);
+}
+
+void showWelcomeDialog(HWND parent) {
+    // Custom buttons so we can offer "Show keyboard shortcuts" alongside OK.
+    const TASKDIALOG_BUTTON buttons[] = {
+        {1001, L"Got it"},
+        {1002, L"Show keyboard shortcuts"},
+    };
+    TASKDIALOGCONFIG cfg{};
+    cfg.cbSize             = sizeof(cfg);
+    cfg.hwndParent         = parent;
+    cfg.hInstance          = GetModuleHandleW(nullptr);
+    cfg.dwFlags            = TDF_ALLOW_DIALOG_CANCELLATION;
+    cfg.pszMainIcon        = TD_INFORMATION_ICON;
+    cfg.pszWindowTitle     = L"Welcome to Fluid Wallpaper";
+    cfg.pszMainInstruction = L"Fluid Wallpaper is now running.";
+    cfg.pszContent =
+        L"Move your mouse around the desktop to see the fluid react.\n\n"
+        L"Right-click the fluid icon in the system tray (near the clock) "
+        L"for options like pause, clear, autostart, and exit.\n\n"
+        L"Press M to cycle visual modes, B to toggle bloom, I to toggle "
+        L"idle motion.";
+    cfg.cButtons       = ARRAYSIZE(buttons);
+    cfg.pButtons       = buttons;
+    cfg.nDefaultButton = 1001;
+
+    int clicked = 0;
+    TaskDialogIndirect(&cfg, &clicked, nullptr, nullptr);
+    if (clicked == 1002) showShortcutsDialog(parent);
 }
 
 }  // namespace
@@ -100,6 +184,14 @@ int main(int argc, char** argv) {
                         "without monitor-state detection)\n");
     }
 
+    // Tray icon + right-click menu. Same WS_CHILD reasoning as power: tray
+    // owns a hidden top-level window for the notify-icon callback.
+    tray::Commands tray_cmds;
+    tray::State    tray_state;
+    if (!tray::init(hinst, &tray_cmds, &tray_state)) {
+        fprintf(stderr, "tray::init failed (continuing without tray icon)\n");
+    }
+
     printf("Running at %dx%d.\n", width, height);
     printf("Hotkeys: M=mode  B=bloom  I=idle  C=clear  Esc=quit\n");
 
@@ -109,6 +201,8 @@ int main(int argc, char** argv) {
     printf("[idle]  %s\n", settings.idle_enabled ? "on" : "off");
 
     bool m_was = false, b_was = false, i_was = false, c_was = false, esc_was = false;
+    bool first_run_pending = isFirstRun();
+    bool any_frame_drawn   = false;
 
     auto start_time = std::chrono::steady_clock::now();
     auto last_time  = start_time;
@@ -161,7 +255,59 @@ int main(int argc, char** argv) {
             printf("[clear] simulation reset\n");
         }
 
+        // Tray menu reads these to draw checkmarks; sync before draining
+        // commands so a freshly-opened menu shows correct state.
+        tray_state.paused.store(power::is_user_paused());
+        tray_state.bloom_enabled.store(settings.bloom_enabled);
+        tray_state.idle_enabled.store(settings.idle_enabled);
+
+        if (tray_cmds.quit.exchange(false))         { g_quit = true; break; }
+        if (tray_cmds.toggle_pause.exchange(false)) {
+            bool now_paused = !power::is_user_paused();
+            power::set_user_paused(now_paused);
+            printf("[pause] %s\n", now_paused ? "paused" : "resumed");
+        }
+        if (tray_cmds.clear.exchange(false)) {
+            cuda.clear();
+            printf("[clear] simulation reset\n");
+        }
+        if (tray_cmds.next_mode.exchange(false)) {
+            settings.mode = nextMode(settings.mode);
+            printf("[mode]  %s\n", visualModeName(settings.mode));
+        }
+        if (tray_cmds.toggle_bloom.exchange(false)) {
+            settings.bloom_enabled = !settings.bloom_enabled;
+            printf("[bloom] %s\n", settings.bloom_enabled ? "on" : "off");
+        }
+        if (tray_cmds.toggle_idle.exchange(false)) {
+            settings.idle_enabled = !settings.idle_enabled;
+            printf("[idle]  %s\n", settings.idle_enabled ? "on" : "off");
+        }
+        if (tray_cmds.toggle_autostart.exchange(false)) {
+            bool now_enabled;
+            if (autostart::is_enabled()) {
+                autostart::disable();
+                now_enabled = false;
+            } else {
+                autostart::enable();
+                now_enabled = true;
+            }
+            printf("[autostart] %s\n", now_enabled ? "enabled" : "disabled");
+        }
+        if (tray_cmds.show_about.exchange(false)) {
+            showAboutDialog(hwnd);
+        }
+
         power::poll();
+
+        // First-run welcome: fires after the first frame is already on screen
+        // so the user sees the wallpaper running behind the dialog instead of
+        // a blank desktop.
+        if (first_run_pending && any_frame_drawn) {
+            showWelcomeDialog(hwnd);
+            markFirstRunComplete();
+            first_run_pending = false;
+        }
 
         // Skip both sim and render when nobody can see us. DX11's flip
         // swap chain holds the last presented frame, so the desktop keeps
@@ -171,6 +317,7 @@ int main(int argc, char** argv) {
         }
         if (!power::should_skip_render()) {
             renderer.render();
+            any_frame_drawn = true;
         }
 
         // Explicit frame pacing. With vsync disabled in Present() this is
@@ -184,6 +331,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    tray::shutdown();
     power::unregister_notifications();
     DestroyWindow(hwnd);
     return 0;
