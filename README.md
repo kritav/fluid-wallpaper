@@ -63,8 +63,6 @@ The app paces itself based on visibility and power source:
 | Desktop fully obscured by a window        | 5    |
 | Fullscreen app running / monitor off / paused | 2 (heartbeat) |
 
-GPU usage on an RTX 3060 in the default state is ~3–5%. When a fullscreen game is running it drops to effectively zero.
-
 ## Build from source
 
 Prerequisites: Visual Studio 2022 (with Desktop C++), CUDA Toolkit 12+, CMake 3.20+.
