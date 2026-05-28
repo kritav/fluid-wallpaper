@@ -92,6 +92,8 @@ python3 wallpaper/resources/_gen_icons.py
 
 ## Troubleshooting
 
+**Important** Make sure Windows Defender allows you to download the app in the first place!
+
 **Nothing happens after install.** Open Task Manager → Details and confirm `fluid-wallpaper.exe` is running. If it's not, the most common cause is a missing CUDA runtime: install the latest NVIDIA driver.
 
 **Wallpaper shows behind a black rectangle / icons disappear.** This is an interaction with virtual-desktop tools or third-party shell replacements. Try right-clicking the desktop → **View → Show desktop icons** to toggle.
