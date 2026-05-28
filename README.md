@@ -10,6 +10,9 @@ Real-time CUDA fluid simulation as a Windows desktop wallpaper. The fluid reacts
 ## Download
 
 Get the latest installer from the [Releases page](https://github.com/kritav/fluid-wallpaper/releases) and run it. No admin rights needed; the installer drops the app into your per-user Programs folder.
+(docs/Step1.png)
+(docs/Step2.png)
+(docs/Step3.png)
 
 ## Requirements
 
