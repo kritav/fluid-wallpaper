@@ -6,10 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(CUDAToolkit REQUIRED)
 
-# Console-subsystem exe (no WIN32 flag) — Phase 1 keeps a console window
-# for logs and Ctrl+C exit. The tray icon now provides the user-facing
-# control surface; the console remains for diagnostics.
-add_executable(fluid-wallpaper
+# GUI-subsystem exe (WIN32). A windowed app doesn't spawn a console on
+# launch, and — crucially — isn't tied to one, so launching from a terminal
+# (or autostart) won't die when that terminal closes. The tray icon is the
+# user-facing control surface. Pass --standalone to get a diagnostic console
+# at runtime (see main.cpp).
+add_executable(fluid-wallpaper WIN32
     src/main.cpp
     src/wallpaper.cpp
     src/renderer.cpp
@@ -20,6 +22,12 @@ add_executable(fluid-wallpaper
     src/tray.cpp
     resources/app.rc
 )
+
+# Keep the standard int main() entry point under /SUBSYSTEM:WINDOWS instead
+# of switching to WinMain — mainCRTStartup still sets up argc/argv.
+if (MSVC)
+    target_link_options(fluid-wallpaper PRIVATE /ENTRY:mainCRTStartup)
+endif()
 
 # Turing (75), Ampere (80, 86), Ada (89), Hopper (90). Drop the highest
 # entries if nvcc complains about an unsupported arch on older toolkits.

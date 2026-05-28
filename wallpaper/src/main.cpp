@@ -136,6 +136,15 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--standalone") == 0) standalone = true;
     }
 
+    // GUI-subsystem build: no console on a normal launch, so the app runs
+    // silently and won't be killed when a terminal closes. --standalone spins
+    // up a console so printf diagnostics (and Ctrl+C) are available.
+    if (standalone && AllocConsole()) {
+        FILE* f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+    }
+
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
 
